@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kafka Simulator - Producer / Consumer</title>
+<style>
+:root{--bg:#0f1419;--pn:#171d25;--ln:#2a323d;--tx:#d7dde5;--mu:#8693a1;--ok:#3fb950;--wa:#d29922;--er:#f85149;--ac:#58a6ff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:13px/1.45 system-ui,sans-serif}
+header{padding:10px 16px;border-bottom:1px solid var(--ln);display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+header h1{font-size:15px;margin:0}header span{color:var(--mu)}
+main{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+.panel{background:var(--pn);border:1px solid var(--ln);border-radius:8px;padding:12px}
+.panel h2{margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;gap:8px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0}
+label{color:var(--mu);font-size:12px}
+select,button,input[type=range]{background:#0d1117;color:var(--tx);border:1px solid var(--ln);border-radius:6px;padding:5px 8px;font:inherit}
+button{cursor:pointer}button:hover{border-color:var(--ac)}button.d{border-color:#6e2b2b}button.p{background:#1f3a5f;border-color:var(--ac)}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:8px 0}
+.stat{background:#0d1117;border:1px solid var(--ln);border-radius:6px;padding:6px;text-align:center}
+.stat b{display:block;font-size:17px}.stat i{font-style:normal;color:var(--mu);font-size:11px}.stat i u{text-decoration:none;display:block;color:#5d6a78;font-size:10px}
+.log{height:150px;overflow:auto;background:#0d1117;border:1px solid var(--ln);border-radius:6px;padding:6px;font:11.5px ui-monospace,monospace}
+.log div{white-space:nowrap}.w{color:var(--wa)}.e{color:var(--er)}.o{color:var(--ok)}
+#parts{margin:0 12px 12px}
+.part{display:grid;grid-template-columns:44px 90px 1fr 190px;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--ln)}
+.cells{display:flex;gap:2px;overflow:hidden;height:20px;align-items:center}
+.c{width:9px;height:16px;border-radius:2px;flex:none;opacity:.35}
+.c.n{opacity:1}.c.i{opacity:1;outline:1px solid #fff}
+.mark{width:2px;height:20px;background:#fff;flex:none}
+.own{padding:2px 6px;border-radius:10px;font-size:11px;text-align:center;border:1px solid var(--ln)}
+.cons{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}
+.cn{padding:4px 8px;border-radius:6px;border:1px solid var(--ln);background:#0d1117;font-size:12px}
+.cn.dead{opacity:.4;text-decoration:line-through}
+.tips,.gl{margin:0 12px 12px;background:var(--pn);border:1px solid var(--ln);border-radius:8px;padding:10px 14px}
+.tips h3,.gl h3{margin:0 0 6px;font-size:13px}.tips li{margin:3px 0}
+.gl dl{display:grid;grid-template-columns:200px 1fr;gap:4px 12px;margin:0}
+.gl dt{font-family:ui-monospace,monospace;color:var(--ac)}.gl dd{margin:0}
+@media(max-width:700px){.gl dl{grid-template-columns:1fr}.part{grid-template-columns:36px 70px 1fr}.part span:last-child{grid-column:1/-1}}
+.reb{color:var(--wa);font-weight:600}
+.t{border-bottom:1px dotted var(--mu);cursor:help}
+
+#tip{position:fixed;z-index:99;max-width:320px;background:#1c2430;border:1px solid var(--ac);border-radius:6px;padding:8px 10px;font-size:12px;line-height:1.45;color:var(--tx);box-shadow:0 6px 20px #0008;pointer-events:none;display:none;white-space:pre-line}
+#tip b{color:var(--ac)}[data-tip]{cursor:help}
+</style></head><body>
+<header><h1>Kafka Simulator</h1><span>topic <b id="tname">orders</b> · <b id="pcount">3</b> partition · 1 broker (mô phỏng) · tick 100ms</span>
+<span id="rebstate"></span><button id="reset">Reset</button></header>
+
+<main>
+<section class="panel" id="prod">
+<h2><span>PRODUCER</span><span id="pstat" style="color:var(--mu)"></span></h2>
+<div class="row">
+<label class="t" title="Message key: hash(key) % numPartitions quyết định partition. Cùng key => cùng partition => giữ thứ tự theo key.">message key</label>
+<select id="keymode"><option value="rand">5 key đều nhau</option><option value="hot">hot key (70% user1) → data skew</option><option value="null">key = null (round-robin / sticky)</option></select>
+<label class="t" title="Số replica phải xác nhận trước khi producer coi là thành công. 0 = không chờ, 1 = leader ghi, all = toàn bộ ISR ghi.">acks</label>
+<select id="acks"><option value="0">0 (fire &amp; forget)</option><option value="1" selected>1 (leader)</option><option value="all">all (ISR)</option></select>
+<label class="t" title="enable.idempotence=true: producer gắn ProducerId + sequence number, broker loại bỏ bản ghi retry trùng."><input type="checkbox" id="idem"> enable.idempotence</label>
+</div>
+<div class="row"><label>throughput <b id="rv">5</b> msg/s</label><input type="range" id="rate" min="0" max="60" value="5"></div>
+<div class="row">
+<button class="p" id="burst">Burst 30 record</button>
+<button id="hiccup" class="d" title="Mô phỏng broker không trả response → request.timeout.ms → producer retry">Broker timeout 3s</button>
+<button id="addpart" title="kafka-topics --alter --partitions N+1. Không thể giảm partition.">+1 partition</button>
+</div>
+<div class="stats">
+<div class="stat"><b id="s_sent">0</b><i>send()<u>record gửi</u></i></div>
+<div class="stat"><b id="s_ack">0</b><i>ack nhận<u>RecordMetadata</u></i></div>
+<div class="stat"><b id="s_lost">0</b><i>mất record<u>acks=0 + lỗi</u></i></div>
+<div class="stat"><b id="s_dup">0</b><i>duplicate<u>retry không idempotent</u></i></div>
+</div>
+<div class="log" id="plog"></div>
+</section>
+
+<section class="panel" id="cons">
+<h2><span>CONSUMER GROUP <code>g-orders</code></span><span id="cstat" style="color:var(--mu)"></span></h2>
+<div class="row">
+<button class="p" id="addc" title="Consumer join group → JoinGroup/SyncGroup → rebalance">+ Consumer (JoinGroup)</button>
+<button id="rmc" title="close() → commit offset + LeaveGroup">- Consumer (LeaveGroup)</button>
+<button id="crash" class="d" title="Process chết, không commit. Coordinator phát hiện sau session.timeout.ms">Crash consumer</button>
+</div>
+<div class="row">
+<label class="t" title="Thời gian xử lý business logic cho mỗi record. Lớn hơn tốc độ produce thì lag tăng.">processing time <b id="pv">300</b> ms/record</label><input type="range" id="proc" min="20" max="1500" value="300">
+</div>
+<div class="row">
+<label class="t" title="Chiến lược commit offset => ngữ nghĩa giao hàng (delivery semantics)">offset commit</label>
+<select id="commit"><option value="auto">enable.auto.commit (5s) → at-least-once</option><option value="sync" selected>commitSync sau xử lý → at-least-once</option><option value="before">commit trước xử lý → at-most-once</option></select>
+</div>
+<div class="cons" id="conslist"></div>
+<div class="stats">
+<div class="stat"><b id="s_proc">0</b><i>processed<u>record xử lý xong</u></i></div>
+<div class="stat"><b id="s_lag">0</b><i>consumer lag<u>LEO − committed</u></i></div>
+<div class="stat"><b id="s_redel">0</b><i>redelivery<u>xử lý lặp</u></i></div>
+<div class="stat"><b id="s_skip">0</b><i>skipped<u>mất do at-most-once</u></i></div>
+</div>
+<div class="log" id="clog"></div>
+</section>
+</main>
+
+<section class="panel" id="parts"><h2><span>TOPIC PARTITIONS (commit log append-only)</span><span style="color:var(--mu)">sáng = chưa commit · mờ = ≤ committed offset · viền trắng = đang xử lý · vạch trắng = committed offset · đỏ = duplicate</span></h2><div id="plist"></div></section>
+
+<section class="tips"><h3>Kịch bản thử (và thuật ngữ nó chứng minh)</h3>
+<ol>
+<li><b>Data skew / hot partition</b>: chọn hot key → 1 partition lag vọt; thêm consumer không giúp vì 1 partition chỉ gán cho 1 consumer trong cùng group.</li>
+<li><b>Parallelism ≤ partition count</b>: thêm consumer thứ 4 khi có 3 partition → consumer idle.</li>
+<li><b>At-least-once</b>: auto commit + crash → record đã xử lý nhưng chưa commit bị redelivery → consumer phải idempotent.</li>
+<li><b>At-most-once</b>: commit trước xử lý + crash → skipped tăng, không duplicate.</li>
+<li><b>Producer retry</b>: acks=0 + timeout → mất record; acks=1/all, idempotence off + timeout → duplicate; bật idempotence thì broker dedup.</li>
+<li><b>Partition expansion</b>: +1 partition → hash(key) % N đổi, mất ordering guarantee cho key cũ. Lên kế hoạch partition từ đầu.</li>
+<li><b>Rebalance (eager protocol)</b>: join/leave/crash → stop-the-world ~1.5s. Thực tế giảm bằng CooperativeStickyAssignor, static membership (group.instance.id).</li>
+</ol></section>
+
+<section class="gl"><h3>Bảng thuật ngữ</h3><dl>
+<dt>Broker</dt><dd>Server Kafka lưu partition và phục vụ producer/consumer. Cluster thật thường ≥ 3 broker.</dd>
+<dt>Topic</dt><dd>Kênh logic chứa record cùng loại (ở đây: <code>orders</code>).</dd>
+<dt>Partition</dt><dd>Đơn vị song song &amp; thứ tự: một commit log append-only. Thứ tự chỉ đảm bảo trong 1 partition.</dd>
+<dt>Record / Message</dt><dd>Bản ghi gồm key, value, timestamp, headers.</dd>
+<dt>Offset</dt><dd>Số thứ tự của record trong 1 partition (0,1,2…), bất biến.</dd>
+<dt>LEO (Log End Offset)</dt><dd>Offset kế tiếp sẽ được ghi = "end" ở bảng partition.</dd>
+<dt>Committed offset</dt><dd>Offset consumer group đã xác nhận xử lý, lưu ở topic nội bộ <code>__consumer_offsets</code>. Vạch trắng.</dd>
+<dt>Consumer lag</dt><dd>LEO − committed offset. Chỉ số quan trọng nhất để giám sát consumer.</dd>
+<dt>Partitioner</dt><dd>Chọn partition: có key → hash(key) % N; key null → sticky/round-robin.</dd>
+<dt>Producer acks</dt><dd>0 / 1 / all — đánh đổi giữa latency và độ bền (durability). Kết hợp <code>min.insync.replicas</code>.</dd>
+<dt>ISR (In-Sync Replicas)</dt><dd>Tập replica theo kịp leader. acks=all chờ toàn bộ ISR.</dd>
+<dt>Idempotent producer</dt><dd>ProducerId + sequence number → broker loại record retry trùng (exactly-once cho 1 producer/partition).</dd>
+<dt>Consumer group</dt><dd>Nhóm consumer chia nhau partition của topic; mỗi partition chỉ thuộc 1 consumer trong group. Nhiều group đọc độc lập.</dd>
+<dt>Group coordinator / Rebalance</dt><dd>Broker điều phối membership; mỗi lần thành viên đổi thì phân chia lại partition (assignment).</dd>
+<dt>Delivery semantics</dt><dd>at-most-once (commit trước), at-least-once (commit sau), exactly-once (transactions / idempotent sink).</dd>
+<dt>Retention</dt><dd>Record không bị xoá khi consumer đọc; chỉ xoá theo thời gian/dung lượng (hoặc compaction). Vì vậy replay được bằng cách reset offset.</dd>
+</dl></section>
+
+<div id="tip"></div>
+<script>
+const COLORS=['#58a6ff','#3fb950','#d29922','#f778ba','#a371f7','#ff7b72','#79c0ff','#56d364'];
+const KEYS=['user1','user2','user3','user4','user5'];
+const KC={};KEYS.forEach((k,i)=>KC[k]=COLORS[i]);KC['∅']='#8693a1';
+const $=id=>document.getElementById(id);
+let S;
+function fresh(){
+ S={t:0,np:3,parts:[],committed:[],cons:[],nextCid:1,rr:0,seq:0,
+  rebUntil:0,hiccupUntil:0,inflight:[],
+  sent:0,ack:0,lost:0,pdup:0,proc:0,redel:0,skip:0,seen:new Set(),acc:0,lastAuto:0};
+ for(let i=0;i<S.np;i++){S.parts.push([]);S.committed.push(0);}
+ addCons(true);addCons(true);rebalance();
+ $('plog').innerHTML='';$('clog').innerHTML='';
+}
+const hash=s=>{let h=7;for(const c of s)h=(h*31+c.charCodeAt(0))>>>0;return h};
+function log(id,msg,cls=''){const el=$(id);const d=document.createElement('div');d.className=cls;d.textContent=(S.t/1000).toFixed(1).padStart(5)+'s  '+msg;el.appendChild(d);while(el.childNodes.length>150)el.removeChild(el.firstChild);el.scrollTop=1e9}
+function pickKey(){const m=$('keymode').value;
+ if(m==='null')return null;
+ if(m==='hot')return Math.random()<.7?'user1':KEYS[1+Math.floor(Math.random()*4)];
+ return KEYS[Math.floor(Math.random()*5)];}
+function produce(){
+ const key=pickKey();const p=key===null?(S.rr++%S.np):hash(key)%S.np;
+ const m={id:++S.seq,key:key||'∅',p};S.sent++;
+ const acks=$('acks').value;const lat={0:5,1:25,all:70}[acks];
+ const down=S.t<S.hiccupUntil;
+ if(acks==='0'){
+  if(down){S.lost++;log('plog',`#${m.id} key=${m.key} → P${p} acks=0, broker timeout: record MẤT, producer không biết`,'e');return;}
+  S.inflight.push({at:S.t+lat,m});return;
+ }
+ S.inflight.push({at:down?S.hiccupUntil+lat:S.t+lat,m,wasDown:down});
+}
+function append(m,dup){
+ const off=S.parts[m.p].length;S.parts[m.p].push({off,id:m.id,key:m.key,dup});return off;
+}
+function stepProducer(){
+ const keep=[];
+ for(const f of S.inflight){
+  if(f.at>S.t){keep.push(f);continue;}
+  const m=f.m;
+  if(f.wasDown){
+   const idem=$('idem').checked;
+   log('plog',`#${m.id} key=${m.key} → P${m.p} request.timeout → retry`+(idem?' (idempotent)':''),'w');
+   if(Math.random()<.5){append(m,false);
+     if(!idem){append(m,true);S.pdup++;log('plog',`#${m.id} ghi 2 lần: broker đã ghi nhưng ack mất, retry không idempotent`,'e');}
+     else log('plog',`#${m.id} retry bị broker loại (ProducerId+sequence)`,'o');
+   }else append(m,false);
+   S.ack++;continue;
+  }
+  const off=append(m,false);S.ack++;
+  if(S.ack%10===1||S.sent<12)log('plog',`#${m.id} key=${m.key} → P${m.p} @offset ${off} ack`,'o');
+ }
+ S.inflight=keep;
+}
+function addCons(silent){
+ const c={id:S.nextCid,parts:[],pos:{},busy:0,alive:true,cur:null,col:COLORS[S.nextCid%COLORS.length],n:0};
+ S.nextCid++;S.cons.push(c);
+ if(!silent){log('clog',`C${c.id} JoinGroup → rebalance`,'w');rebalance();}
+}
+function liveCons(){return S.cons.filter(c=>c.alive)}
+function rebalance(){
+ S.rebUntil=S.t+1500;
+ for(const c of S.cons){c.parts=[];c.cur=null;c.busy=0;}
+}
+function applyAssign(){
+ const L=liveCons();
+ for(let p=0;p<S.np;p++){if(L.length)L[p%L.length].parts.push(p);}
+ for(const c of L){c.pos={};for(const p of c.parts)c.pos[p]=S.committed[p];}
+ log('clog','assignment (RoundRobin): '+(L.map(c=>`C${c.id}=[${c.parts.map(p=>'P'+p).join(',')}]`).join(' ')||'(không consumer)')+' · resume từ committed offset','w');
+ const idle=L.filter(c=>!c.parts.length);
+ if(idle.length)log('clog',`C${idle.map(c=>c.id).join(',C')} idle: số consumer > số partition`,'e');
+}
+function commit(c,p){S.committed[p]=Math.max(S.committed[p],c.pos[p]);}
+function stepConsumers(){
+ const mode=$('commit').value;
+ if(S.rebUntil){
+  if(S.t<S.rebUntil)return;
+  S.rebUntil=0;applyAssign();
+ }
+ if(mode==='auto'&&S.t-S.lastAuto>=5000){S.lastAuto=S.t;
+  for(const c of liveCons())for(const p of c.parts)commit(c,p);}
+ const pt=+$('proc').value;
+ for(const c of liveCons()){
+  if(c.cur){
+   if(S.t>=c.busy){
+    const m=c.cur;S.proc++;c.n++;
+    if(S.seen.has(m.id))S.redel++;
+    S.seen.add(m.id);
+    if(mode==='sync')commit(c,m.p);
+    c.cur=null;
+   }
+   continue;
+  }
+  for(const p of c.parts){
+   const m=S.parts[p][c.pos[p]];
+   if(!m)continue;
+   c.pos[p]++;
+   if(mode==='before')commit(c,p);
+   c.cur=Object.assign({},m,{p});c.busy=S.t+pt;break;
+  }
+ }
+}
+function crash(){
+ const L=liveCons();
+ const act=L.filter(c=>c.parts.length||c.cur);
+ const c=(act.length?act:L)[Math.floor(Math.random()*(act.length||L.length))];
+ if(!c)return;
+ const mode=$('commit').value;
+ let redo=0;
+ for(const p of c.parts)redo+=Math.max(0,c.pos[p]-S.committed[p]);
+ if(c.cur&&mode==='before')S.skip++;
+ c.alive=false;
+ log('clog',`C${c.id} CRASH, không commit. `+(mode==='before'?'record đang xử lý đã commit ⇒ bị bỏ sót (at-most-once)':redo+' record đọc rồi chưa commit sẽ bị đọc lại (at-least-once)'),'e');
+ c.parts=[];c.cur=null;rebalance();
+}
+function render(){
+ $('pcount').textContent=S.np;
+ $('rebstate').innerHTML=S.rebUntil?'<span class="reb">⏸ REBALANCING — group tạm dừng fetch</span>':'';
+ const L=liveCons();
+ $('conslist').innerHTML=S.cons.map(c=>`<div class="cn ${c.alive?'':'dead'}" style="border-left:3px solid ${c.col}">C${c.id} ${c.alive?'assigned['+c.parts.map(p=>'P'+p).join(',')+'] · '+c.n+' rec':'crashed'}</div>`).join('');
+ let lagT=0,h='';
+ for(let p=0;p<S.np;p++){
+  const lg=S.parts[p],cm=S.committed[p],lag=lg.length-cm;lagT+=lag;
+  const own=L.find(c=>c.parts.includes(p));
+  const cells=[];
+  const from=Math.max(0,lg.length-70);
+  for(let o=from;o<lg.length;o++){
+   if(o===cm)cells.push('<div class="mark"></div>');
+   const m=lg[o];const inf=own&&own.cur&&own.cur.p===p&&own.cur.off===o;
+   cells.push(`<div class="c ${o>=cm?'n':''} ${inf?'i':''}" data-tip="<b>Record</b> offset ${o}\nkey = ${m.key}\n${o<cm?'Đã commit: group coi là xử lý xong':'Chưa commit: nếu consumer crash sẽ bị đọc lại'}${m.dup?'\n<b>DUPLICATE</b>: bản ghi trùng do producer retry không idempotent':''}" style="background:${m.dup?'#f85149':KC[m.key]}"></div>`);
+  }
+  if(cm===lg.length)cells.push('<div class="mark"></div>');
+  h+=`<div class="part"><b data-tip="<b>Partition ${p}</b>\nCommit log append-only. Thứ tự record chỉ được đảm bảo trong partition này.">P${p}</b><span data-tip="<b>Partition assignment</b>\nConsumer đang được gán partition này. Mỗi partition chỉ thuộc 1 consumer trong cùng group." class="own" style="border-color:${own?own.col:'var(--ln)'}">${own?'C'+own.id:'unassigned'}</span><div class="cells">${cells.join('')}</div><span><u data-tip="<b>LEO – Log End Offset</b>\nOffset kế tiếp sẽ được ghi = tổng số record trong partition." style="text-decoration:none">LEO ${lg.length}</u> · <u data-tip="<b>Committed offset</b>\nVị trí group đã xác nhận (lưu ở __consumer_offsets). Consumer khởi động lại sẽ đọc tiếp từ đây." style="text-decoration:none">committed ${cm}</u> · <span data-tip="<b>Consumer lag</b> = LEO − committed\nĐộ trễ của group so với producer. Lag tăng đều = consumer không theo kịp (cần thêm partition/consumer hoặc tối ưu xử lý)."> lag </span><b style="color:${lag>20?'var(--er)':lag>5?'var(--wa)':'var(--ok)'}">${lag}</b></span></div>`;
+ }
+ $('plist').innerHTML=h;
+ $('s_sent').textContent=S.sent;$('s_ack').textContent=S.ack;$('s_lost').textContent=S.lost;$('s_dup').textContent=S.pdup;
+ $('s_proc').textContent=S.proc;$('s_lag').textContent=lagT;$('s_redel').textContent=S.redel;$('s_skip').textContent=S.skip;
+ $('pstat').textContent=S.t<S.hiccupUntil?'⚠ broker không phản hồi':'';
+ $('cstat').textContent=L.length+' member / '+S.np+' partition';
+}
+setInterval(()=>{
+ S.t+=100;
+ S.acc+=+$('rate').value/10;
+ while(S.acc>=1){S.acc--;produce();}
+ stepProducer();stepConsumers();render();
+},100);
+$('rate').oninput=e=>$('rv').textContent=e.target.value;
+$('proc').oninput=e=>$('pv').textContent=e.target.value;
+$('burst').onclick=()=>{for(let i=0;i<30;i++)produce();log('plog','burst 30 record','w')};
+$('hiccup').onclick=()=>{S.hiccupUntil=S.t+3000;log('plog','broker không phản hồi 3s','e')};
+$('addpart').onclick=()=>{S.parts.push([]);S.committed.push(0);S.np++;
+ log('plog',`partition: ${S.np-1} → ${S.np}. hash(key)%${S.np} đổi, cùng key có thể sang partition khác`,'w');
+ log('clog','metadata thay đổi → rebalance','w');rebalance();};
+$('addc').onclick=()=>addCons();
+$('rmc').onclick=()=>{const L=liveCons();if(!L.length)return;const c=L[L.length-1];
+ for(const p of c.parts)commit(c,p);
+ c.alive=false;log('clog',`C${c.id} LeaveGroup (đã commit offset) → rebalance`,'w');rebalance();};
+$('crash').onclick=crash;
+$('reset').onclick=fresh;
+fresh();
+
+const TIPS={s_sent:'<b>send()</b>\nSố record producer đã gọi send(). Chưa chắc broker đã ghi.',
+ s_ack:'<b>ack</b>\nBroker xác nhận đã ghi (RecordMetadata: partition + offset). Mức xác nhận phụ thuộc acks.',
+ s_lost:'<b>Record loss</b>\nacks=0 gặp lỗi: producer không biết record mất. Dùng acks=1/all để phát hiện và retry.',
+ s_dup:'<b>Duplicate</b>\nBroker ghi xong nhưng ack mất → producer retry → ghi 2 lần. Bật enable.idempotence để broker dedup.',
+ s_proc:'<b>Processed</b>\nSố record consumer đã xử lý xong business logic.',
+ s_lag:'<b>Consumer lag</b>\nTổng (LEO − committed offset) mọi partition. Chỉ số cần cảnh báo nhất.',
+ s_redel:'<b>Redelivery</b>\nRecord bị xử lý lại do consumer crash trước khi commit. Là bản chất at-least-once → xử lý phải idempotent.',
+ s_skip:'<b>Skipped</b>\nat-most-once: offset đã commit trước khi xử lý xong, crash → record không bao giờ được xử lý.'};
+for(const id in TIPS){const st=$(id).closest('.stat');if(st)st.dataset.tip=TIPS[id];}
+document.querySelectorAll('[title]').forEach(el=>{el.dataset.tip=el.getAttribute('title');el.removeAttribute('title');});
+const tip=$('tip');
+function showTip(t,x,y){tip.innerHTML=t;tip.style.display='block';
+ const w=tip.offsetWidth,h=tip.offsetHeight;
+ tip.style.left=Math.max(6,Math.min(x+14,innerWidth-w-6))+'px';
+ tip.style.top=(y+h+20>innerHeight?y-h-10:y+16)+'px';}
+document.addEventListener('mousemove',e=>{const el=e.target.closest&&e.target.closest('[data-tip]');
+ if(el)showTip(el.dataset.tip,e.clientX,e.clientY);else tip.style.display='none';});
+document.addEventListener('click',e=>{const el=e.target.closest&&e.target.closest('[data-tip]');
+ if(el&&matchMedia('(hover:none)').matches)showTip(el.dataset.tip,e.clientX,e.clientY);});
+</script></body></html>

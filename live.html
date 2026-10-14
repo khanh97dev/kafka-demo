@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kafka – Livestream join/leave</title>
+<style>
+:root{--bg:#0f1419;--pn:#171d25;--ln:#2a323d;--tx:#d7dde5;--mu:#8693a1;--ok:#3fb950;--wa:#d29922;--er:#f85149;--ac:#58a6ff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:13px/1.45 system-ui,sans-serif}
+header{padding:10px 16px;border-bottom:1px solid var(--ln);display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+header h1{font-size:15px;margin:0}header span{color:var(--mu)}
+main{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+.panel{background:var(--pn);border:1px solid var(--ln);border-radius:8px;padding:12px;margin:0}
+.panel h2{margin:0 0 8px;font-size:14px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0}
+label{color:var(--mu);font-size:12px}
+select,button,input[type=range]{background:#0d1117;color:var(--tx);border:1px solid var(--ln);border-radius:6px;padding:5px 8px;font:inherit}
+button{cursor:pointer}button:hover{border-color:var(--ac)}button.p{background:#1f3a5f;border-color:var(--ac)}button.d{border-color:#6e2b2b}
+.log{height:140px;overflow:auto;background:#0d1117;border:1px solid var(--ln);border-radius:6px;padding:6px;font:11.5px ui-monospace,monospace}
+.log div{white-space:nowrap}.w{color:var(--wa)}.e{color:var(--er)}.o{color:var(--ok)}
+.sec{margin:0 12px 12px}
+table{width:100%;border-collapse:collapse}td,th{padding:5px 8px;border-bottom:1px solid var(--ln);text-align:left}
+th{color:var(--mu);font-weight:500}
+.part{display:grid;grid-template-columns:40px 80px 1fr 170px;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid var(--ln)}
+.cells{display:flex;gap:2px;overflow:hidden;height:18px;align-items:center}
+.c{width:8px;height:14px;border-radius:2px;flex:none;opacity:.35}.c.n{opacity:1}
+.own{padding:2px 6px;border-radius:10px;font-size:11px;text-align:center;border:1px solid var(--ln)}
+.bad{color:var(--er);font-weight:600}.good{color:var(--ok)}
+dl{display:grid;grid-template-columns:190px 1fr;gap:4px 12px;margin:0}dt{font-family:ui-monospace,monospace;color:var(--ac)}dd{margin:0}
+@media(max-width:700px){dl{grid-template-columns:1fr}}
+#tip{position:fixed;z-index:99;max-width:320px;background:#1c2430;border:1px solid var(--ac);border-radius:6px;padding:8px 10px;font-size:12px;box-shadow:0 6px 20px #0008;pointer-events:none;display:none;white-space:pre-line}
+#tip b{color:var(--ac)}[data-tip]{cursor:help}
+.reb{color:var(--wa);font-weight:600}
+</style></head><body>
+<header><h1>Livestream: user JOIN / LEAVE qua Kafka</h1>
+<span>topic <b>live.viewer-events</b> · 3 partition · consumer group <b>viewer-count</b></span><span id="reb"></span><button id="reset">Reset</button></header>
+
+<main>
+<section class="panel"><h2>PRODUCER — Gateway/WebSocket server của livestream</h2>
+<div class="row">
+<label data-tip="<b>Partition key</b>\nQuyết định event nào vào partition nào. Chỉ event cùng key mới có thứ tự tương đối với nhau.">partition key</label>
+<select id="key"><option value="stream">streamId (đúng cho đếm viewer theo stream)</option><option value="user">userId</option><option value="null">null (round-robin) — SAI</option></select>
+</div>
+<div class="row"><label>user vào/ra <b id="rv">8</b> event/s</label><input type="range" id="rate" min="0" max="40" value="8"></div>
+<div class="row">
+<button class="p" id="raid" data-tip="Một streamer nổi tiếng lên sóng: 150 user cùng JOIN stream S1 trong 1 lần → hot key / hot partition.">Raid: 150 user vào S1</button>
+<button id="leaveAll" data-tip="Streamer tắt live: toàn bộ viewer của S1 LEAVE gần như cùng lúc.">S1 kết thúc (mass LEAVE)</button>
+</div>
+<div class="row"><label>Mỗi event: <code>{type: JOIN|LEAVE, userId, streamId, ts}</code></label></div>
+<div class="log" id="plog"></div></section>
+
+<section class="panel"><h2>CONSUMER GROUP <code>viewer-count</code> — dịch vụ đếm viewer</h2>
+<div class="row"><button class="p" id="addc">+ Consumer</button><button id="rmc">- Consumer</button><button class="d" id="crash">Crash</button>
+<label>speed <b id="pv">15</b> event/s mỗi consumer</label><input type="range" id="speed" min="2" max="40" value="15"></div>
+<div class="row"><label data-tip="Consumer chậm hơn thì dễ làm lộ lỗi sai thứ tự khi key không đúng. C1 nhanh, các consumer sau chậm dần.">consumer có tốc độ khác nhau (C1 nhanh, sau đó chậm dần)</label></div>
+<div class="log" id="clog"></div></section>
+</main>
+
+<section class="panel sec"><h2>KẾT QUẢ: viewer count mỗi stream</h2>
+<table><tr><th>Stream</th><th data-tip="Số viewer thật tại gateway (nguồn sự thật).">Thực tế</th><th data-tip="Giá trị consumer tính từ sự kiện: join +1, leave −1.">Consumer đếm</th><th data-tip="Số user nằm trong tập viewer của consumer (state store).">Set size</th><th data-tip="User đã LEAVE ở thực tế nhưng consumer xử lý LEAVE trước JOIN → mãi mắc kẹt trong tập viewer.">Ghost viewer</th><th>Partition</th></tr>
+<tbody id="res"></tbody></table>
+<div class="row"><span>Event sai thứ tự (LEAVE đến trước JOIN): <b id="ooo" class="bad">0</b></span></div></section>
+
+<section class="panel sec"><h2>PARTITIONS</h2><div id="plist"></div></section>
+
+<section class="panel sec"><h2>Vì sao thiết kế như vậy (thuật ngữ)</h2><dl>
+<dt>key = streamId</dt><dd>Mọi JOIN/LEAVE của 1 stream vào cùng 1 partition → tuần tự (per-key ordering) → đếm đúng. Đánh đổi: <b>hot partition</b> khi stream S1 quá lớn.</dd>
+<dt>key = userId</dt><dd>JOIN/LEAVE của 1 user vẫn đúng thứ tự, tải chia đều hơn. Nhưng count của stream bị chia nhiều partition → cần cộng gộp (aggregate) — consumer đếm per-partition rồi merge, hoặc dùng Kafka Streams.</dd>
+<dt>key = null</dt><dd>Round-robin: JOIN và LEAVE của cùng 1 user rơi vào 2 partition khác nhau, consumer khác nhau → LEAVE có thể đến trước JOIN → ghost viewer.</dd>
+<dt>Consumer group</dt><dd>Mỗi partition chỉ 1 consumer. Thêm consumer chỉ hữu ích tới số partition.</dd>
+<dt>Rebalance</dt><dd>Consumer join/leave/crash → group dừng ~1.5s, partition gán lại. Trong livestream nghĩa là count đứng im rồi nhảy.</dd>
+<dt>Lag</dt><dd>LEO − committed. Raid 150 user làm lag vọt; viewer count hiển thị trễ.</dd>
+<dt>Idempotent consumer</dt><dd>Dùng Set (userId) thay vì counter ±1 để xử lý trùng không làm count sai. Ở bảng trên "Set size" dựa trên Set.</dd>
+<dt>Compaction</dt><dd>Topic state <code>viewer-state</code> (key = streamId:userId) bật log compaction chỉ giữ giá trị mới nhất; dùng để khôi phục state sau khi consumer restart.</dd>
+</dl></section>
+<div id="tip"></div>
+<script>
+const $=id=>document.getElementById(id);
+const STREAMS=['S1','S2','S3'];const COL={S1:'#ff7b72',S2:'#58a6ff',S3:'#3fb950'};
+let S;
+const hash=s=>{let h=7;for(const c of s)h=(h*31+c.charCodeAt(0))>>>0;return h};
+function fresh(){
+ S={t:0,np:3,parts:[[],[],[]],committed:[0,0,0],cons:[],nid:1,rr:0,reb:0,acc:0,uid:0,
+  real:{S1:new Set(),S2:new Set(),S3:new Set()},
+  cnt:{S1:0,S2:0,S3:0},set:{S1:new Set(),S2:new Set(),S3:new Set()},
+  pendLeave:{S1:new Set(),S2:new Set(),S3:new Set()},ghost:{S1:0,S2:0,S3:0},ooo:0,pend:[]};
+ addC(true);addC(true);S.reb=S.t+1500;
+ $('plog').innerHTML='';$('clog').innerHTML='';
+}
+function log(id,m,c=''){const el=$(id),d=document.createElement('div');d.className=c;d.textContent=(S.t/1000).toFixed(1).padStart(5)+'s  '+m;el.appendChild(d);while(el.childNodes.length>120)el.removeChild(el.firstChild);el.scrollTop=1e9}
+function addC(silent){const c={id:S.nid++,parts:[],alive:true,pos:{},acc:0,n:0};S.cons.push(c);if(!silent){log('clog',`C${c.id} JoinGroup → rebalance`,'w');S.reb=S.t+1500;clear()}}
+function clear(){S.cons.forEach(c=>c.parts=[])}
+const live=()=>S.cons.filter(c=>c.alive);
+function send(type,user,stream){
+ const k=$('key').value;
+ const key=k==='stream'?stream:k==='user'?user:null;
+ const p=key===null?(S.rr++%S.np):hash(key)%S.np;
+ S.parts[p].push({type,user,stream,p,off:S.parts[p].length});
+}
+function gen(){
+ // chon JOIN hoac LEAVE; S1 nhieu viewer nhat
+ const st=Math.random()<.6?'S1':STREAMS[1+Math.floor(Math.random()*2)];
+ const real=S.real[st];
+ if(real.size>0&&(Math.random()<.45||real.size>400)){
+  const u=[...real][Math.floor(Math.random()*real.size)];
+  real.delete(u);send('LEAVE',u,st);
+  S.pend.push(null);
+ }else{
+  const u='u'+(++S.uid);real.add(u);send('JOIN',u,st);
+ }
+}
+function assign(){
+ const L=live();for(let p=0;p<S.np;p++){if(L.length)L[p%L.length].parts.push(p)}
+ for(const c of L){c.pos={};for(const p of c.parts)c.pos[p]=S.committed[p]}
+ log('clog','assignment: '+L.map(c=>`C${c.id}=[${c.parts.map(p=>'P'+p).join(',')}]`).join(' '),'w');
+}
+function consume(){
+ if(S.reb){if(S.t<S.reb)return;S.reb=0;assign();}
+ const base=+$('speed').value;
+ live().forEach((c,i)=>{
+  c.acc+=base*Math.pow(.55,i)/10; // C1 nhanh nhat
+  while(c.acc>=1){
+   c.acc--;
+   let m=null;
+   for(const p of c.parts){const e=S.parts[p][c.pos[p]];if(e){m=e;c.pos[p]++;S.committed[p]=c.pos[p];break}}
+   if(!m)break;
+   c.n++;handle(m);
+  }
+ });
+}
+function handle(m){
+ const st=m.stream;
+ if(m.type==='JOIN'){
+  if(S.pendLeave[st].has(m.user)){ // LEAVE da xu ly truoc JOIN
+   S.pendLeave[st].delete(m.user);S.ooo++;
+   S.set[st].add(m.user);S.ghost[st]++;S.cnt[st]++;
+   log('clog',`${m.user} JOIN ${st} đến SAU LEAVE (sai thứ tự) → ghost viewer`,'e');
+  }else{S.set[st].add(m.user);S.cnt[st]++;}
+ }else{
+  if(S.set[st].has(m.user)){S.set[st].delete(m.user);S.cnt[st]--;}
+  else{S.pendLeave[st].add(m.user);S.cnt[st]--;} // leave truoc join
+ }
+}
+function render(){
+ $('reb').innerHTML=S.reb?'<span class="reb">⏸ REBALANCING</span>':'';
+ let h='';
+ for(const st of STREAMS){
+  const real=S.real[st].size,c=S.cnt[st],sz=S.set[st].size;
+  let g=0;for(const u of S.set[st])if(!S.real[st].has(u))g++;
+  const diff=c!==real;
+  h+=`<tr><td><b style="color:${COL[st]}">${st}</b></td><td>${real}</td><td class="${diff?'bad':'good'}">${c}</td><td>${sz}</td><td class="${g?'bad':'good'}">${g}</td><td>${$('key').value==='stream'?'P'+hash(st)%S.np:'nhiều partition'}</td></tr>`;
+ }
+ $('res').innerHTML=h;$('ooo').textContent=S.ooo;
+ let ph='';
+ for(let p=0;p<S.np;p++){
+  const lg=S.parts[p],cm=S.committed[p],lag=lg.length-cm;
+  const own=live().find(c=>c.parts.includes(p));
+  const cells=lg.slice(-80).map((e,i)=>{const o=lg.length-Math.min(80,lg.length)+i;return `<div class="c ${o>=cm?'n':''}" data-tip="offset ${o}\\n${e.type} ${e.user} @ ${e.stream}" style="background:${COL[e.stream]};${e.type==='LEAVE'?'height:8px':''}"></div>`}).join('');
+  ph+=`<div class="part"><b>P${p}</b><span class="own">${own?'C'+own.id:'—'}</span><div class="cells">${cells}</div><span>LEO ${lg.length} · lag <b class="${lag>40?'bad':lag>10?'':'good'}">${lag}</b></span></div>`;
+ }
+ $('plist').innerHTML=ph+'<div style="color:var(--mu);margin-top:6px">ô cao = JOIN, ô thấp = LEAVE · màu theo stream · mờ = đã commit</div>';
+}
+setInterval(()=>{
+ S.t+=100;S.acc+=+$('rate').value/10;
+ while(S.acc>=1){S.acc--;gen()}
+ consume();render();
+},100);
+$('rate').oninput=e=>$('rv').textContent=e.target.value;
+$('speed').oninput=e=>$('pv').textContent=e.target.value;
+$('raid').onclick=()=>{for(let i=0;i<150;i++){const u='u'+(++S.uid);S.real.S1.add(u);send('JOIN',u,'S1')}log('plog','RAID: 150 user JOIN S1','w')};
+$('leaveAll').onclick=()=>{const a=[...S.real.S1];S.real.S1.clear();a.forEach(u=>send('LEAVE',u,'S1'));log('plog',`S1 kết thúc: ${a.length} LEAVE`,'w')};
+$('addc').onclick=()=>addC();
+$('rmc').onclick=()=>{const L=live();if(L.length<=1)return;L[L.length-1].alive=false;log('clog','LeaveGroup → rebalance','w');S.reb=S.t+1500;clear()};
+$('crash').onclick=()=>{const L=live();if(L.length<=1)return;const c=L[Math.floor(Math.random()*L.length)];c.alive=false;log('clog',`C${c.id} CRASH → rebalance (resume từ committed)`,'e');S.reb=S.t+1500;clear()};
+$('reset').onclick=fresh;
+// tooltip
+const tip=$('tip');
+document.addEventListener('mousemove',e=>{const el=e.target.closest&&e.target.closest('[data-tip]');
+ if(!el){tip.style.display='none';return}
+ tip.innerHTML=el.dataset.tip;tip.style.display='block';
+ const w=tip.offsetWidth;tip.style.left=Math.min(e.clientX+14,innerWidth-w-6)+'px';tip.style.top=(e.clientY+16)+'px';});
+fresh();
+</script></body></html>
